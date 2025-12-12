@@ -193,8 +193,7 @@ class PPOLagrange:
             if log_src is not None:
                 for key, val in log_src.items():
                     key_lower = str(key).lower()
-                    if not any(token in key_lower for token in ("reward", "cost", "penalty")):
-                        continue
+                    
                     try:
                         tensor_val = to_device_tensor(val, self.device)
                     except Exception:
@@ -204,12 +203,16 @@ class PPOLagrange:
                     total = tensor_val.sum().item()
                     count = tensor_val.numel()
                     name = _sanitize_term_key(key)
-                    if "reward" in key_lower:
+                    
+                    # Separate reward and cost terms
+                    if name in self.cost_keys:
+                        # Costs are positive
+                        val_abs = total if total >= 0 else -total
+                        cost_term_sums[name] = cost_term_sums.get(name, 0.0) + val_abs
+                        cost_term_counts[name] = cost_term_counts.get(name, 0) + count
+                    else:
                         reward_term_sums[name] = reward_term_sums.get(name, 0.0) + total
                         reward_term_counts[name] = reward_term_counts.get(name, 0) + count
-                    else:
-                        cost_term_sums[name] = cost_term_sums.get(name, 0.0) + total
-                        cost_term_counts[name] = cost_term_counts.get(name, 0) + count
 
         collection_time = time.perf_counter() - rollout_start
         update_start = time.perf_counter()

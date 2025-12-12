@@ -15,13 +15,13 @@ class PCPO(CPO):
 
         obs = obs.to(self.device)
         actions = actions.to(self.device)
-        returns = returns.to(self.device)
-        advantages = advantages.to(self.device)
-        values = values.to(self.device)
+        returns = returns.to(self.device).squeeze(-1)
+        advantages = advantages.to(self.device).squeeze(-1)
+        values = values.to(self.device).squeeze(-1)
         log_probs = log_probs.to(self.device)
-        cost_returns = cost_returns.to(self.device)
-        cost_advantages = cost_advantages.to(self.device)
-        cost_values = cost_values.to(self.device)
+        cost_returns = cost_returns.to(self.device).squeeze(-1)
+        cost_advantages = cost_advantages.to(self.device).squeeze(-1)
+        cost_values = cost_values.to(self.device).squeeze(-1)
         mu = mu.to(self.device)
         sigma = sigma.to(self.device)
 
@@ -48,7 +48,8 @@ class PCPO(CPO):
 
         old_dist = torch.distributions.Normal(mu, sigma)
         new_mean = self.actor_critic.actor_mean(obs)
-        new_dist = torch.distributions.Normal(new_mean, self.actor_critic.std)
+        new_std = torch.nn.functional.softplus(self.actor_critic.std) + 1e-5
+        new_dist = torch.distributions.Normal(new_mean, new_std)
         curr_log_probs = new_dist.log_prob(actions).sum(dim=-1)
         ratio = torch.exp(curr_log_probs - log_probs)
 
@@ -72,7 +73,8 @@ class PCPO(CPO):
 
             # Re-compute distribution on sampled data
             curr_mean = self.actor_critic.actor_mean(sample_obs)
-            curr_dist = torch.distributions.Normal(curr_mean, self.actor_critic.std)
+            curr_std = torch.nn.functional.softplus(self.actor_critic.std) + 1e-5
+            curr_dist = torch.distributions.Normal(curr_mean, curr_std)
             old_dist_sample = torch.distributions.Normal(sample_mu, sample_sigma)
 
             kl = torch.distributions.kl_divergence(old_dist_sample, curr_dist).mean()

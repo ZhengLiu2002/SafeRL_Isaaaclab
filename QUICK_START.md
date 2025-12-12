@@ -16,8 +16,10 @@ cd /home/lz/Project/IsaacLab
 cd /home/lz/Project/IsaacLab/Isaaclab_SafeRL/CPO
 python scripts/train.py \
     --task Isaac-Velocity-Galileo-CPO-v0 \
-    --num_envs 2048 \
-    --max_iterations 1000
+    --num_envs 8192 \
+    --max_iterations 10000 \
+    --headless \
+    --log_interval 10
 ```
 
 ### 2. FOCPO (First-Order CPO)
@@ -26,7 +28,9 @@ cd /home/lz/Project/IsaacLab/Isaaclab_SafeRL/FOCPO
 python scripts/train.py \
     --task Isaac-Velocity-Galileo-FOCPO-v0 \
     --num_envs 2048 \
-    --max_iterations 1000
+    --max_iterations 1000 \
+    --headless \
+    --log_interval 1
 ```
 
 ### 3. PCPO (Projection-Based CPO)
@@ -35,7 +39,8 @@ cd /home/lz/Project/IsaacLab/Isaaclab_SafeRL/PCPO
 python scripts/train.py \
     --task Isaac-Velocity-Galileo-PCPO-v0 \
     --num_envs 2048 \
-    --max_iterations 1000
+    --max_iterations 1000 \
+    --headless
 ```
 
 ### 4. PPOLag (PPO-Lagrange)
@@ -44,7 +49,9 @@ cd /home/lz/Project/IsaacLab/Isaaclab_SafeRL/PPOLag
 python scripts/train.py \
     --task Isaac-Velocity-Galileo-PPOLag-v0 \
     --num_envs 2048 \
-    --max_iterations 1000
+    --max_iterations 1000 \
+    --headless \
+    --log_interval 1
 ```
 
 ## 测试训练好的模型
@@ -55,8 +62,8 @@ python scripts/train.py \
 cd /home/lz/Project/IsaacLab/Isaaclab_SafeRL/CPO
 python scripts/play.py \
     --task Isaac-Velocity-Galileo-CPO-v0 \
-    --model_path logs/CPO/Isaac-Velocity-Galileo-CPO-v0/20250101_120000/model_1000.pt \
-    --num_envs 4
+    --num_envs 50 \
+    --model_path logs/CPO/
 ```
 
 ## 配置文件位置
@@ -110,36 +117,22 @@ Isaaclab_SafeRL/
 
 ## 查看训练进度
 ```bash
-# 启动 TensorBoard
-tensorboard --logdir Isaaclab_SafeRL/[ALGO]/logs/[ALGO]/Isaac-Velocity-Galileo-[ALGO]-v0/
+# 启动 TensorBoard（建议在根目录下运行以查看所有算法的日志）
+# 确保在 Isaaclab_SafeRL 目录下运行，或者调整路径
+tensorboard --logdir . --port 6008
 
-# 例如：查看 CPO 训练进度
-tensorboard --logdir Isaaclab_SafeRL/CPO/logs/CPO/Isaac-Velocity-Galileo-CPO-v0/
+# 查看特定算法的日志
+tensorboard --logdir CPO/logs --port 6008
 ```
 
-## 故障排除
-
-### 问题：找不到 galileo_parkour 模块
-**解决方案**:
-```bash
-# 确保在 IsaacLab 环境中
-cd /home/lz/Project/IsaacLab
-# 重新设置环境
-source isaaclab.sh
-```
-
-### 问题：找不到任务 ID
-**解决方案**: 确保使用正确的任务 ID：
-- CPO: `Isaac-Velocity-Galileo-CPO-v0`
-- FOCPO: `Isaac-Velocity-Galileo-FOCPO-v0`
-- PCPO: `Isaac-Velocity-Galileo-PCPO-v0`
-- PPOLag: `Isaac-Velocity-Galileo-PPOLag-v0`
-
-### 问题：GPU 内存不足
-**解决方案**: 减少并行环境数量
-```bash
-python scripts/train.py --task Isaac-Velocity-Galileo-CPO-v0 --num_envs 1024
-```
+## TensorBoard 内容说明
+训练日志包含以下主要部分：
+- **Episode/**: 回合奖励、长度、成本
+- **Train/**: 训练过程中的平均奖励、成本、KL散度等
+- **Loss/**: 各种损失函数值
+- **RewardTerms/**: 各项奖励的具体数值（如跟踪速度、惩罚项等）
+- **CostTerms/**: 各项安全约束的具体数值（如速度限制、碰撞等）
+- **Perf/**: 训练性能指标（FPS等）
 
 ## 自定义配置
 
@@ -161,4 +154,7 @@ python scripts/train.py --task Isaac-Velocity-Galileo-CPO-v0 --num_envs 1024
 
 ## 更多信息
 详细的迁移信息请参考 `MIGRATION_SUMMARY.md`。
+
+
+
 

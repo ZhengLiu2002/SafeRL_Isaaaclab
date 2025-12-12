@@ -61,6 +61,82 @@ def reward_alive(
     return torch.ones(env.num_envs, device=env.device)
 
 
+def track_lin_vel_xy_exp(
+    env: ParkourManagerBasedRLEnv,
+    command_name: str = "base_velocity",
+    std: float = 0.5,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Custom linear velocity tracker (exp kernel) to replace isaaclab built-in."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    commands = env.command_manager.get_command(command_name)[:, :2]
+    lin_vel_error = torch.sum(torch.square(commands - asset.data.root_lin_vel_b[:, :2]), dim=1)
+    return torch.exp(-lin_vel_error / (std**2 + 1e-6))
+
+
+def track_ang_vel_z_exp(
+    env: ParkourManagerBasedRLEnv,
+    command_name: str = "base_velocity",
+    std: float = 0.5,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Custom yaw velocity tracker (exp kernel) to replace isaaclab built-in."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    commands = env.command_manager.get_command(command_name)[:, 2]
+    ang_vel_error = torch.square(commands - asset.data.root_ang_vel_b[:, 2])
+    return torch.exp(-ang_vel_error / (std**2 + 1e-6))
+
+
+def base_height_l2(
+    env: ParkourManagerBasedRLEnv,
+    target_height: float,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    sensor_cfg: SceneEntityCfg | None = None,
+) -> torch.Tensor:
+    """Penalize deviation from target base height; kept local to avoid official reward import."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    adjusted_target = target_height
+    if sensor_cfg is not None:
+        try:
+            sensor = env.scene[sensor_cfg.name]
+            adjusted_target = target_height + torch.mean(sensor.data.ray_hits_w[..., 2], dim=1)
+        except Exception:
+            adjusted_target = target_height
+    return torch.square(asset.data.root_pos_w[:, 2] - adjusted_target)
+
+
+def lin_vel_z_l2(env: ParkourManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    """Z-axis linear velocity penalty (body frame)."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    return torch.square(asset.data.root_lin_vel_b[:, 2])
+
+
+def ang_vel_xy_l2(env: ParkourManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    """XY angular velocity penalty (body frame)."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    return torch.sum(torch.square(asset.data.root_ang_vel_b[:, :2]), dim=1)
+
+
+def flat_orientation_l2(env: ParkourManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    """Flat-orientation penalty mirroring isaaclab's projected-gravity version."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    return torch.sum(torch.square(asset.data.projected_gravity_b[:, :2]), dim=1)
+
+
+def joint_torques_l2(env: ParkourManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    """L2 penalty on applied joint torques."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    return torch.sum(torch.square(asset.data.applied_torque[:, asset_cfg.joint_ids]), dim=1)
+
+
+def joint_pos_limits(env: ParkourManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    """Penalize joints that cross soft position limits."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    out_of_limits = -(asset.data.joint_pos[:, asset_cfg.joint_ids] - asset.data.soft_joint_pos_limits[:, asset_cfg.joint_ids, 0]).clip(max=0.0)
+    out_of_limits += (asset.data.joint_pos[:, asset_cfg.joint_ids] - asset.data.soft_joint_pos_limits[:, asset_cfg.joint_ids, 1]).clip(min=0.0)
+    return torch.sum(out_of_limits, dim=1)
+
+
 def _get_yaw(quat: torch.Tensor) -> torch.Tensor:
     """Return body yaw from quaternion."""
     _, _, yaw = euler_xyz_from_quat(quat)

@@ -11,19 +11,16 @@ class RolloutStorage:
         if self.pin_memory:
             zeros_kwargs["pin_memory"] = True
 
-        # Core data
         self.observations = torch.zeros(num_transitions_per_env, num_envs, *obs_shape, **zeros_kwargs)
         self.actions = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, **zeros_kwargs)
         self.rewards = torch.zeros(num_transitions_per_env, num_envs, 1, **zeros_kwargs)
-        self.costs = torch.zeros(num_transitions_per_env, num_envs, 1, **zeros_kwargs) # Safe RL addition
+        self.costs = torch.zeros(num_transitions_per_env, num_envs, 1, **zeros_kwargs)
         self.dones = torch.zeros(num_transitions_per_env, num_envs, 1, **zeros_kwargs)
         
-        # Log probabilities and values for PPO updates
         self.actions_log_prob = torch.zeros(num_transitions_per_env, num_envs, **zeros_kwargs)
         self.values = torch.zeros(num_transitions_per_env, num_envs, 1, **zeros_kwargs)
-        self.cost_values = torch.zeros(num_transitions_per_env, num_envs, 1, **zeros_kwargs) # Safe RL addition
+        self.cost_values = torch.zeros(num_transitions_per_env, num_envs, 1, **zeros_kwargs)
         
-        # Return calculation
         self.returns = torch.zeros(num_transitions_per_env, num_envs, 1, **zeros_kwargs)
         self.cost_returns = torch.zeros(num_transitions_per_env, num_envs, 1, **zeros_kwargs)
         self.advantages = torch.zeros(num_transitions_per_env, num_envs, 1, **zeros_kwargs)
@@ -67,38 +64,26 @@ class RolloutStorage:
     def compute_returns(self, last_values, last_cost_values, gamma, lam, cost_gamma, cost_lam):
         last_values = last_values.to(self.device)
         last_cost_values = last_cost_values.to(self.device)
-        # GAE for Reward
-        last_gae_lam = 0
-        for t in reversed(range(self.num_transitions_per_env)):
-            if t == self.num_transitions_per_env - 1:
-                next_non_terminal = 1.0 - self.dones[t] # Should be next_dones? Usually buffer stores done of current step
-                # NOTE: In standard implementations, we might need the *next* observation's done state or value
-                # Here we simplify: we assume 'last_values' corresponds to step T+1
-                next_values = last_values
-            else:
-                next_non_terminal = 1.0 - self.dones[t + 1]
-                next_values = self.values[t + 1]
-            
-            delta = self.rewards[t] + gamma * next_values * next_non_terminal - self.values[t]
-            last_gae_lam = delta + gamma * lam * next_non_terminal * last_gae_lam
-            self.advantages[t] = last_gae_lam
-        
-        self.returns = self.advantages + self.values
 
-        # GAE for Cost
-        last_cost_gae_lam = 0
+        values_ext = torch.cat([self.values, last_values.unsqueeze(0)], dim=0)
+        cost_values_ext = torch.cat([self.cost_values, last_cost_values.unsqueeze(0)], dim=0)
+        dones_ext = torch.cat([self.dones, self.dones[-1:]], dim=0)
+
+        gae = torch.zeros_like(last_values)
+        cost_gae = torch.zeros_like(last_cost_values)
+
         for t in reversed(range(self.num_transitions_per_env)):
-            if t == self.num_transitions_per_env - 1:
-                next_non_terminal = 1.0 - self.dones[t]
-                next_cost_values = last_cost_values
-            else:
-                next_non_terminal = 1.0 - self.dones[t + 1]
-                next_cost_values = self.cost_values[t + 1]
-            
-            delta_cost = self.costs[t] + cost_gamma * next_cost_values * next_non_terminal - self.cost_values[t]
-            last_cost_gae_lam = delta_cost + cost_gamma * cost_lam * next_non_terminal * last_cost_gae_lam
-            self.cost_advantages[t] = last_cost_gae_lam
-        
+            next_non_terminal = 1.0 - dones_ext[t + 1]
+
+            delta = self.rewards[t] + gamma * values_ext[t + 1] * next_non_terminal - values_ext[t]
+            gae = delta + gamma * lam * next_non_terminal * gae
+            self.advantages[t] = gae
+
+            delta_cost = self.costs[t] + cost_gamma * cost_values_ext[t + 1] * next_non_terminal - cost_values_ext[t]
+            cost_gae = delta_cost + cost_gamma * cost_lam * next_non_terminal * cost_gae
+            self.cost_advantages[t] = cost_gae
+
+        self.returns = self.advantages + self.values
         self.cost_returns = self.cost_advantages + self.cost_values
 
     def mini_batch_generator(self, num_mini_batches, num_epochs=8):
@@ -137,7 +122,6 @@ class RolloutStorage:
                     flat_cost_values[batch_idx],
                 )
 
-    # For CPO/TRPO we often need full batch
     def full_batch(self):
         obs = self.observations.flatten(0, 1)
         actions = self.actions.flatten(0, 1)

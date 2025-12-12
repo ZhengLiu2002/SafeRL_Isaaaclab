@@ -261,13 +261,13 @@ def main():
             for key, val in logs.items():
                 if key.endswith("_term") and "cost" not in key and "penalty" not in key:
                     clean_key = key.replace("_term", "")
-                    log_string += f"""{clean_key:>{pad}} {val:.4f}\n"""
+                    log_string += f"""{clean_key:-<{pad}} {val:.4f}\n"""
 
             log_string += f"\n{'Cost Terms:':>{pad}}\n"
             for key, val in logs.items():
                 if key.endswith("_term") and ("cost" in key or "penalty" in key):
                     clean_key = key.replace("_term", "")
-                    log_string += f"""{clean_key:>{pad}} {val:.4f}\n"""
+                    log_string += f"""{clean_key:-<{pad}} {val:.4f}\n"""
 
             log_string += (
                 f"""{'-' * width}\n"""

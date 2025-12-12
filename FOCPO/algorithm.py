@@ -36,13 +36,13 @@ class FOCPO(CPO):
 
         obs = obs.to(self.device)
         actions = actions.to(self.device)
-        returns = returns.to(self.device)
-        advantages = advantages.to(self.device)
-        values = values.to(self.device)
+        returns = returns.to(self.device).squeeze(-1)
+        advantages = advantages.to(self.device).squeeze(-1)
+        values = values.to(self.device).squeeze(-1)
         log_probs = log_probs.to(self.device)
-        cost_returns = cost_returns.to(self.device)
-        cost_advantages = cost_advantages.to(self.device)
-        cost_values = cost_values.to(self.device)
+        cost_returns = cost_returns.to(self.device).squeeze(-1)
+        cost_advantages = cost_advantages.to(self.device).squeeze(-1)
+        cost_values = cost_values.to(self.device).squeeze(-1)
         mu = mu.to(self.device)
         sigma = sigma.to(self.device)
 
@@ -68,7 +68,8 @@ class FOCPO(CPO):
         cost_advantages = (cost_advantages - cost_advantages.mean()) / (cost_advantages.std() + 1e-8)
 
         new_mean = self.actor_critic.actor_mean(obs)
-        new_dist = torch.distributions.Normal(new_mean, self.actor_critic.std)
+        new_std = torch.nn.functional.softplus(self.actor_critic.std) + 1e-5
+        new_dist = torch.distributions.Normal(new_mean, new_std)
         curr_log_probs = new_dist.log_prob(actions).sum(dim=-1)
         ratio = torch.exp(curr_log_probs - log_probs)
 

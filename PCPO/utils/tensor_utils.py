@@ -39,5 +39,7 @@ def extract_costs(info, cost_keys, device, num_envs):
 
     for key in cost_keys:
         if key in log_src:
-            costs += to_device_tensor(log_src[key], device=device)
+            # We assume costs are positive, but rewards/penalties in Isaac Lab are often negative.
+            # We take the absolute value to ensure costs are positive constraints.
+            costs += to_device_tensor(log_src[key], device=device).abs()
     return costs

@@ -3,7 +3,6 @@ import os
 import sys
 from pathlib import Path
 
-# Add package paths so local modules resolve when run from this folder.
 SCRIPT_DIR = Path(__file__).resolve()
 ALGO_ROOT = SCRIPT_DIR.parents[1]
 REPO_ROOT = SCRIPT_DIR.parents[2]
@@ -18,15 +17,12 @@ from isaaclab.app import AppLauncher
 from modules import ActorCritic
 from utils.tensor_utils import extract_obs
 
-from config.galileo_env_cfg import TASK_ID as DEFAULT_TASK, register_task
-
-
 def main():
     parser = argparse.ArgumentParser(description="Play/Evaluate a CPO agent in Isaac Lab.")
-    parser.add_argument("--task", type=str, default=DEFAULT_TASK, help="Name of the task.")
+    parser.add_argument("--task", type=str, default=None, help="Name of the task.")
     parser.add_argument("--model_path", type=str, required=True, help="Path to the saved model (.pt).")
     parser.add_argument("--num_envs", type=int, default=1, help="Number of vectorized environments to run.")
-    parser.add_argument("--num_steps", type=int, default=1000, help="Maximum steps to run.")
+    parser.add_argument("--num_steps", type=int, default=100000, help="Maximum steps to run.")
     parser.add_argument("--stochastic", action="store_true", help="Sample actions (with policy std) instead of deterministic mean.")
     parser.add_argument("--log_interval", type=int, default=200, help="How often to print rollout diagnostics.")
 
@@ -37,18 +33,17 @@ def main():
     app_launcher = AppLauncher(args)
     simulation_app = app_launcher.app
 
-    # Register the CPO-specific task so we load the right env config.
+    from config.galileo.galileo_env_cfg import TASK_ID as DEFAULT_TASK, register_task
+
+    task_name = args.task or DEFAULT_TASK
     register_task()
 
-    # Delayed import: requires SimulationApp to be initialized by AppLauncher
-    from isaaclab_tasks.utils import parse_env_cfg  # noqa: WPS433
-    import isaaclab_tasks  # noqa: F401, WPS433
+    from isaaclab_tasks.utils import parse_env_cfg
+    import isaaclab_tasks
 
-    # Create environment using registry config
-    env_cfg = parse_env_cfg(args.task, device=str(device), num_envs=args.num_envs)
-    env = gym.make(args.task, cfg=env_cfg)
+    env_cfg = parse_env_cfg(task_name, device=str(device), num_envs=args.num_envs)
+    env = gym.make(task_name, cfg=env_cfg)
 
-    # Build policy from actual reset to get correct shapes (handles vectorized envs)
     init_obs, _ = env.reset()
     init_obs_tensor = extract_obs(init_obs, device=device)
     num_obs = init_obs_tensor.shape[-1]
@@ -94,4 +89,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
