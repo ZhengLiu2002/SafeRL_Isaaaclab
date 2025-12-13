@@ -42,15 +42,6 @@ def _unwrap_env(env):
     return cur
 
 
-def _match_term_key(term_keys, target_name: str):
-    target_str = str(target_name)
-    for key in term_keys:
-        key_str = str(key)
-        if key_str == target_str or key_str.endswith(target_str):
-            return key
-    return None
-
-
 def main():
     parser = argparse.ArgumentParser(description="Train CPO Agent (optimized logging)")
     parser.add_argument("--task", type=str, default=None)
@@ -80,7 +71,7 @@ def main():
     from config.galileo.galileo_cpo_cfg import ALGO_CFG, DEFAULT_TRAIN_CFG
     from algorithm import CPO
     from modules import ActorCritic
-    from utils.tensor_utils import extract_obs
+    from utils.tensor_utils import extract_obs, sanitize_term_key
 
     register_task()
     task_name = args.task or TASK_ID
@@ -101,14 +92,7 @@ def main():
     env_cfg = parse_env_cfg(task_name, device=str(device), num_envs=num_envs)
     env_cfg.seed = seed
     env = gym.make(task_name, cfg=env_cfg)
-    base_env = env.unwrapped
-    if not hasattr(base_env, "reward_manager"):
-        temp = base_env
-        while hasattr(temp, "env"):
-            if hasattr(temp, "reward_manager"):
-                base_env = temp
-                break
-            temp = temp.env
+    base_env = _unwrap_env(env)
     print(f"[Info] Base Env resolved to: {type(base_env)}")
 
     if args.cost_keys:
@@ -127,13 +111,32 @@ def main():
 
     actor_critic = ActorCritic(num_obs, num_actions).to(device)
 
-    reward_log_keys = None
-    try:
-        rew_mgr = getattr(base_env, "reward_manager", None)
-        if rew_mgr and hasattr(rew_mgr, "terms"):
-            reward_log_keys = list(getattr(rew_mgr, "terms", {}).keys())
-    except Exception:
-        reward_log_keys = None
+    # Keep a small allowlist of non-reward diagnostics we still want to log/plot.
+    extra_key_groups = {
+        "diagnostics": ("error_vel_xy", "error_vel_yaw"),
+        "terminations": ("base_contact", "time_out"),
+        "curriculum": ("terrain_levels", "command_ang_vel_z", "command_lin_vel_x", "command_lin_vel_y"),
+    }
+    extra_log_keys = [k for keys in extra_key_groups.values() for k in keys]
+
+    def _active_reward_term_names(env_obj):
+        try:
+            rew_mgr = getattr(env_obj, "reward_manager", None)
+            active = getattr(rew_mgr, "active_terms", None) if rew_mgr is not None else None
+            if isinstance(active, dict):
+                out = []
+                for names in active.values():
+                    out.extend(list(names))
+                return list(dict.fromkeys(out))
+            if isinstance(active, (list, tuple)):
+                return list(dict.fromkeys(active))
+            term_names = list(getattr(rew_mgr, "_term_names", []) or []) if rew_mgr is not None else []
+            return list(dict.fromkeys(term_names))
+        except Exception:
+            return []
+
+    reward_term_names = _active_reward_term_names(base_env)
+    reward_log_keys = list(dict.fromkeys([*reward_term_names, *extra_log_keys])) if reward_term_names else None
 
     cpo_kwargs = ALGO_CFG.copy()
     cpo_kwargs.update(
@@ -157,54 +160,36 @@ def main():
     log_dir = ALGO_ROOT / "logs" / "CPO" / task_name / run_name
     writer = None if args.no_tensorboard else SummaryWriter(log_dir / "tb")
 
-    reward_diagnostics = {
-        "reward_error_vel_xy",
-        "reward_error_vel_yaw",
-    }
-    reward_terminations = {
-        "reward_base_contact",
-        "reward_time_out",
-    }
-    reward_curriculum = {
-        "reward_terrain_levels",
-        "reward_command_ang_vel_z",
-        "reward_command_lin_vel_x",
-        "reward_command_lin_vel_y",
-    }
+    extra_reward_keys = {f"reward_{sanitize_term_key(k)}" for k in extra_log_keys}
+    reward_diagnostic_keys = {f"reward_{sanitize_term_key(k)}" for k in extra_key_groups["diagnostics"]}
+    reward_termination_keys = {f"reward_{sanitize_term_key(k)}" for k in extra_key_groups["terminations"]}
+    reward_curriculum_keys = {f"reward_{sanitize_term_key(k)}" for k in extra_key_groups["curriculum"]}
 
-    reward_term_keys = set()
-    reward_allowlist = set()
-    try:
-        if hasattr(base_env, "reward_manager") and hasattr(base_env.reward_manager, "terms"):
-            reward_term_keys = {
-                f"reward_{str(k)}" if not str(k).startswith("reward_") else str(k)
-                for k in getattr(base_env.reward_manager, "terms", {}).keys()
-            }
-    except Exception:
-        reward_term_keys = set()
+    reward_component_names = {sanitize_term_key(n) for n in (reward_term_names or [])}
+    reward_component_keys = {f"reward_{n}" for n in reward_component_names}
+    allowed_reward_keys = (reward_component_keys | extra_reward_keys) if reward_component_keys else None
 
-    try:
-        from config.galileo.galileo_env_cfg import LocomotionRewardsCfg
-
-        for name in dir(LocomotionRewardsCfg):
-            if name.startswith("_"):
+    def _collect_reward_weights(env_obj, term_names):
+        weights = {}
+        rew_mgr_local = getattr(env_obj, "reward_manager", None)
+        if not term_names or rew_mgr_local is None or not hasattr(rew_mgr_local, "get_term_cfg"):
+            return weights
+        for term_name in term_names:
+            try:
+                term_cfg = rew_mgr_local.get_term_cfg(term_name)
+            except Exception:
+                term_cfg = None
+            w = getattr(term_cfg, "weight", None) if term_cfg is not None else None
+            if w is None:
                 continue
-            term_obj = getattr(LocomotionRewardsCfg, name)
-            if hasattr(term_obj, "func"):
-                reward_allowlist.add(f"reward_{name}")
-    except Exception:
-        reward_allowlist = set()
+            weights[sanitize_term_key(term_name).lower()] = float(w)
+        return weights
 
-    allowed_reward_keys = reward_term_keys | reward_allowlist
-    if not allowed_reward_keys:
-        allowed_reward_keys = None
+    reward_weights = _collect_reward_weights(base_env, reward_term_names)
 
-    def _is_reward_component(key: str) -> bool:
-        if key in reward_diagnostics or key in reward_terminations or key in reward_curriculum:
-            return False
-        if allowed_reward_keys is None:
-            return True
-        return key in allowed_reward_keys
+    def _is_zero_weight_reward(name: str) -> bool:
+        w = reward_weights.get(sanitize_term_key(name).lower())
+        return w is not None and abs(w) <= 1e-12
 
     print(f"[INFO] Training started. Logs: {log_dir}")
 
@@ -217,12 +202,17 @@ def main():
         if stage and stage.name != current_stage:
             print(f"\n[Curriculum] Stage -> {stage.name}: {stage.description}")
             apply_stage_runtime(base_env, agent, stage)
+            reward_weights = _collect_reward_weights(base_env, reward_term_names)
             current_stage = stage.name
 
         iter_start = time.perf_counter()
         logs = agent.step()
         step_time = time.perf_counter() - iter_start
         fps = steps_per_iter / max(step_time, 1e-8)
+
+        # Refresh reward weights for accurate filtering (weights can be modified by curriculum/runtime).
+        if writer or (it % log_interval == 0):
+            reward_weights = _collect_reward_weights(base_env, reward_term_names)
 
         if it % log_interval == 0:
             total_cost = logs.get("Meta/estimated_ep_cost", 0.0)
@@ -238,6 +228,7 @@ def main():
             lin_xy_err = logs.get("Debug/lin_xy_err", 0.0)
             ang_vel_err = logs.get("Debug/ang_vel_z_err", 0.0)
             sigma_mean = logs.get("Policy/mean_action_std", 0.0)
+            policy_entropy = logs.get("policy_entropy", 0.0)
             num_cmd = logs.get("Debug/num_cmd_samples", 0)
             num_act = logs.get("Debug/num_act_samples", 0)
             real_done_rate = logs.get("Episode/real_done_rate", None)
@@ -265,19 +256,21 @@ def main():
             for k, v in logs.items():
                 if not k.startswith("reward_"):
                     continue
-                if allowed_reward_keys and k not in allowed_reward_keys:
+                if allowed_reward_keys is not None and k not in allowed_reward_keys:
                     continue
 
-                pretty = k.replace("reward_", "")
+                pretty = k.replace("reward_", "", 1)
+                if k in reward_component_keys and _is_zero_weight_reward(pretty):
+                    continue
                 value = _to_float(v)
 
-                if _is_reward_component(k):
+                if k in reward_component_keys or (allowed_reward_keys is None and k not in extra_reward_keys):
                     reward_terms.append((pretty, value))
-                elif k in reward_diagnostics:
+                elif k in reward_diagnostic_keys:
                     diagnostic_terms.append((pretty, value))
-                elif k in reward_terminations:
+                elif k in reward_termination_keys:
                     termination_terms.append((pretty, value))
-                elif k in reward_curriculum:
+                elif k in reward_curriculum_keys:
                     curriculum_terms.append((pretty, value))
                 else:
                     other_reward_like.append((pretty, value))
@@ -308,6 +301,7 @@ def main():
                 f"    {fmt('Mean reward:', f'{mean_reward:.4f}')}",
                 f"    {fmt('Mean action noise std:', f'{sigma_mean:.2f}')}",
                 f"    {fmt('KL divergence:', f'{kl_val:.4f}')}",
+                f"    {fmt('Policy entropy:', f'{policy_entropy:.3f}')}",
                 f"    {fmt('Episode length:', f'{ep_len:.2f}')}",
             ]
             if real_done_rate is not None and timeout_rate is not None:
@@ -401,6 +395,14 @@ def main():
 
             writer.add_scalar("Policy/KL", logs.get("kl", 0.0), global_step)
             writer.add_scalar("Policy/Action_Std", logs.get("Policy/mean_action_std", 0.0), global_step)
+            writer.add_scalar("Policy/Entropy", logs.get("policy_entropy", 0.0), global_step)
+            writer.add_scalar("Policy/Action_Std_Min", logs.get("policy_std_min", 0.0), global_step)
+            writer.add_scalar("Policy/Action_Std_Max", logs.get("policy_std_max", 0.0), global_step)
+            writer.add_scalar(
+                "Policy/Update_Accepted", float(logs.get("cpo/step_frac", 0.0) > 0.0), global_step
+            )
+            writer.add_scalar("Loss/Policy_Surr_Reward", logs.get("policy_surr_reward", 0.0), global_step)
+            writer.add_scalar("Loss/Policy_Surr_Cost", logs.get("policy_surr_cost", 0.0), global_step)
             writer.add_scalar("Loss/Value", logs.get("value_loss", 0.0), global_step)
             writer.add_scalar("Loss/Cost_Value", logs.get("cost_value_loss", 0.0), global_step)
             writer.add_scalar("Episode/Real_Done_Rate", logs.get("Episode/real_done_rate", 0.0), global_step)
@@ -421,14 +423,18 @@ def main():
 
             for key, val in logs.items():
                 if key.startswith("reward_"):
+                    if allowed_reward_keys is not None and key not in allowed_reward_keys:
+                        continue
                     pretty = key.replace("reward_", "", 1)
-                    if _is_reward_component(key):
+                    if key in reward_component_keys and _is_zero_weight_reward(pretty):
+                        continue
+                    if key in reward_component_keys or (allowed_reward_keys is None and key not in extra_reward_keys):
                         tag = f"Rewards/Components/{pretty}"
-                    elif key in reward_diagnostics:
+                    elif key in reward_diagnostic_keys:
                         tag = f"Diagnostics/{pretty}"
-                    elif key in reward_terminations:
+                    elif key in reward_termination_keys:
                         tag = f"Terminations/{pretty}"
-                    elif key in reward_curriculum:
+                    elif key in reward_curriculum_keys:
                         tag = f"Curriculum/{pretty}"
                     else:
                         tag = f"Rewards/Other/{pretty}"

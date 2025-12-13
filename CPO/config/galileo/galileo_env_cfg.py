@@ -63,19 +63,19 @@ class SafetyConstraintsCfg:
     joint_pos_limit = RewTerm(
         func=cpo_constraints.constraint_joint_pos,
         weight=0.0,
-        params={"asset_cfg": SceneEntityCfg("robot"), "margin": 0.05},
+        params={"asset_cfg": SceneEntityCfg("robot"), "margin": 0.3},
     )
 
     joint_vel_limit = RewTerm(
         func=cpo_constraints.constraint_joint_vel,
         weight=0.0,
-        params={"asset_cfg": SceneEntityCfg("robot"), "limit": 12.0},
+        params={"asset_cfg": SceneEntityCfg("robot"), "limit": 50.0},
     )
 
     joint_torque_limit = RewTerm(
         func=cpo_constraints.constraint_joint_torque,
         weight=0.0,
-        params={"asset_cfg": SceneEntityCfg("robot"), "limit": 40.0},
+        params={"asset_cfg": SceneEntityCfg("robot"), "limit": 100.0},
     )
 
     # body_collision = RewTerm(
@@ -108,28 +108,25 @@ class SafetyConstraintsCfg:
 class LocomotionRewardsCfg:
     track_lin_vel_xy = RewTerm(
         func=cpo_rewards.reward_track_lin_vel_xy,
-        weight=2.5,
+        weight=2,
         params={"command_name": "base_velocity", "std": 0.5, 
                 "asset_cfg": SceneEntityCfg("robot")}
     )
     track_ang_vel_z = RewTerm(
         func=cpo_rewards.reward_track_ang_vel_z,
-        weight=1.5,
+        weight=1.,
         params={"command_name": "base_velocity", "std": 0.5, "asset_cfg": SceneEntityCfg("robot")},
     )
     alive = RewTerm(
         func=cpo_rewards.reward_alive,
-        weight=1.0
+        weight=.5
     )
     feet_air_time = RewTerm(
         func=cpo_rewards.reward_feet_air_time,
-        weight=10.0,
+        weight=3.0,
         params={
-            # 显式列出足端链接名，避免多重匹配冲突
-            "sensor_cfg": SceneEntityCfg(
-                "contact_forces",
-                body_names=["FL_foot", "FR_foot", "RL_foot", "RR_foot"],
-            ),
+            # Use regex to match feet reliably across Galileo variants.
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
             "command_name": "base_velocity",
             "threshold": 0.5,
         },
@@ -137,7 +134,7 @@ class LocomotionRewardsCfg:
     base_height = RewTerm(
         func=cpo_rewards.reward_base_height,
         weight=-1.0,
-        params={"target_height": 0.38, "asset_cfg": SceneEntityCfg("robot")},
+        params={"target_height": 0.4, "asset_cfg": SceneEntityCfg("robot")},
     )
     orientation = RewTerm(
         func=cpo_rewards.reward_orientation, 
@@ -146,12 +143,12 @@ class LocomotionRewardsCfg:
     )
     foot_symmetry = RewTerm(
         func=cpo_rewards.reward_foot_symmetry,
-        weight=1.0,
+        weight=.0,
         params={"asset_cfg": SceneEntityCfg("robot"), "height_scale": 0.12},
     )
     hip_pos = RewTerm(
         func=cpo_rewards.reward_hip_pos,
-        weight=-0.5,
+        weight=-0.2,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*_hip_joint")},
     )
     ang_vel_xy = RewTerm(
@@ -161,12 +158,12 @@ class LocomotionRewardsCfg:
 
     lin_vel_z = RewTerm(
         func=cpo_rewards.reward_lin_vel_z, 
-        weight=-3.0, 
+        weight=-1.0, 
         params={"asset_cfg": SceneEntityCfg("robot")}
     )
     action_rate = RewTerm(
         func=cpo_rewards.reward_action_rate, 
-        weight=-0.05, 
+        weight=-0.01, 
         params={"asset_cfg": SceneEntityCfg("robot")}
     )
     collision = RewTerm(
@@ -179,17 +176,14 @@ class LocomotionRewardsCfg:
     )
     ground_impact = RewTerm(
         func=cpo_rewards.reward_ground_impact,
-        weight=-1e-6,
+        weight=-0.0,
         params={
-            "sensor_cfg": SceneEntityCfg(
-                "contact_forces",
-                body_names=["FL_foot", "FR_foot", "RL_foot", "RR_foot"],
-            ),
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
         },
     )
     torques = RewTerm(
         func=cpo_rewards.reward_torques, 
-        weight=-1.0e-5, 
+        weight=-1.0e-6, 
         params={"asset_cfg": SceneEntityCfg("robot")}
     )
     dof_acc = RewTerm(
@@ -220,7 +214,7 @@ class LocomotionEventCfg:
     reset_robot_joints = EventTermCfg(
         func=mdp.reset_joints_by_scale,
         mode="reset",
-        params={"position_range": (0.95, 1.05), "velocity_range": (0.0, 0.0)},
+        params={"position_range": (0.7, 1.3), "velocity_range": (0.0, 0.0)},
     )
 
     reset_base = EventTermCfg(
@@ -280,12 +274,15 @@ class GalileoOmniEnvCfg(LocomotionVelocityRoughEnvCfg):
     events: LocomotionEventCfg = LocomotionEventCfg()
 
     # 高程图/高度相对约束接口
-    use_height_map: bool = False
+    use_height_map: bool = True
     height_map_sensor_name: str = "height_scanner"
     height_map_obs_key: str = "height_map"
     height_map_target_height: float = 0.4  # 相对地面的期望高度
     height_map_min_height: float = 0.12   # 相对高度下限
     height_map_max_height: float = 0.90   # 相对高度上限
+
+    # Deadband for tiny linear-velocity commands (m/s). Set to 0 to disable.
+    deadband_lin_vel_threshold: float = 0.0
 
     def __post_init__(self):
         super().__post_init__()
@@ -331,7 +328,7 @@ class GalileoOmniEnvCfg(LocomotionVelocityRoughEnvCfg):
 
         if hasattr(self.actions, "joint_pos"):
             # 缩小关节位置动作幅度，降低大幅动作导致的失稳
-            self.actions.joint_pos.scale = 0.3
+            self.actions.joint_pos.scale = 0.4
 
         self._apply_omni_command_ranges()
 

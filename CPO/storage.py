@@ -67,13 +67,17 @@ class RolloutStorage:
 
         values_ext = torch.cat([self.values, last_values.unsqueeze(0)], dim=0)
         cost_values_ext = torch.cat([self.cost_values, last_cost_values.unsqueeze(0)], dim=0)
-        dones_ext = torch.cat([self.dones, self.dones[-1:]], dim=0)
 
         gae = torch.zeros_like(last_values)
         cost_gae = torch.zeros_like(last_cost_values)
 
         for t in reversed(range(self.num_transitions_per_env)):
-            next_non_terminal = 1.0 - dones_ext[t + 1]
+            # IMPORTANT:
+            # `self.dones[t]` indicates whether the transition at time t ended an episode.
+            # Since IsaacLab auto-resets terminated envs inside `env.step`, `obs[t+1]` can be
+            # the first state of the *next* episode. Therefore we must mask bootstrapping with
+            # `done_t` (not `done_{t+1}`), otherwise returns/advantages leak across episodes.
+            next_non_terminal = 1.0 - self.dones[t]
 
             delta = self.rewards[t] + gamma * values_ext[t + 1] * next_non_terminal - values_ext[t]
             gae = delta + gamma * lam * next_non_terminal * gae

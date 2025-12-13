@@ -228,7 +228,10 @@ def reward_ground_impact(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg,
 ) -> torch.Tensor:
-    """惩罚足端接触力跃变，鼓励柔和落地。返回值越低越好。"""
+    """惩罚足端接触力跃变，鼓励柔和落地。
+
+    返回非负 penalty（越大越糟），建议在奖励配置中用负权重相加。
+    """
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
 
     cfg_body_ids = sensor_cfg.body_ids
@@ -251,8 +254,8 @@ def reward_ground_impact(
     curr_forces = contact_sensor.data.net_forces_w_history[:, 0, body_ids]
     prev_forces = contact_sensor.data.net_forces_w_history[:, 1, body_ids]
     delta = curr_forces - prev_forces
-    # -||f_t - f_{t-1}||^2，按足端求均值
-    penalty = -torch.mean(torch.sum(delta * delta, dim=-1), dim=1)
+    # ||f_t - f_{t-1}||^2，按足端求均值
+    penalty = torch.mean(torch.sum(delta * delta, dim=-1), dim=1)
     return penalty
 
 

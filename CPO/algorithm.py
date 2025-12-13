@@ -132,6 +132,15 @@ class CPO:
         real_done_count = 0
         timeout_count = 0
 
+        # Debug aggregates for command/velocity magnitudes (avoid mean-cancellation of signed commands).
+        debug_cmd_lin_xy_sum = 0.0
+        debug_cmd_ang_z_sum = 0.0
+        debug_act_lin_xy_sum = 0.0
+        debug_act_ang_z_sum = 0.0
+        debug_lin_xy_err_sum = 0.0
+        debug_ang_z_err_sum = 0.0
+        debug_metric_count = 0
+
         # 在每个环境中按固定步数运行当前策略并收集过渡样本。
         for _ in range(self.num_steps_per_env):
             if torch.isnan(self.current_obs).any() or torch.isinf(self.current_obs).any():
@@ -199,6 +208,49 @@ class CPO:
                 if isinstance(extras, dict) and isinstance(extras.get("log"), dict):
                     log_src.update(extras["log"])
 
+            # Extract signed command/velocity logs to compute magnitudes for debugging.
+            try:
+                cmd_x = log_src.get("command_lin_vel_x", None)
+                cmd_y = log_src.get("command_lin_vel_y", None)
+                cmd_ang = log_src.get("command_ang_vel_z", None)
+                act_lin_xy = log_src.get("act_lin_vel_xy", None)
+                act_ang = log_src.get("act_ang_vel_z", None)
+
+                if cmd_x is not None and cmd_y is not None:
+                    cmd_x_t = to_device_tensor(cmd_x, self.device).view(-1)[: self.num_envs]
+                    cmd_y_t = to_device_tensor(cmd_y, self.device).view(-1)[: self.num_envs]
+                    cmd_lin_xy_t = torch.norm(torch.stack([cmd_x_t, cmd_y_t], dim=-1), dim=-1)
+                    debug_cmd_lin_xy_sum += cmd_lin_xy_t.mean().item()
+                else:
+                    cmd_lin_xy_t = None
+
+                if cmd_ang is not None:
+                    cmd_ang_t = to_device_tensor(cmd_ang, self.device).view(-1)[: self.num_envs]
+                    debug_cmd_ang_z_sum += cmd_ang_t.abs().mean().item()
+                else:
+                    cmd_ang_t = None
+
+                if act_lin_xy is not None:
+                    act_lin_xy_t = to_device_tensor(act_lin_xy, self.device).view(-1)[: self.num_envs]
+                    debug_act_lin_xy_sum += act_lin_xy_t.mean().item()
+                else:
+                    act_lin_xy_t = None
+
+                if act_ang is not None:
+                    act_ang_t = to_device_tensor(act_ang, self.device).view(-1)[: self.num_envs]
+                    debug_act_ang_z_sum += act_ang_t.abs().mean().item()
+                else:
+                    act_ang_t = None
+
+                if cmd_lin_xy_t is not None and act_lin_xy_t is not None:
+                    debug_lin_xy_err_sum += (cmd_lin_xy_t - act_lin_xy_t).abs().mean().item()
+                if cmd_ang_t is not None and act_ang_t is not None:
+                    debug_ang_z_err_sum += (cmd_ang_t - act_ang_t).abs().mean().item()
+
+                debug_metric_count += 1
+            except Exception:
+                pass
+
             # 汇总环境可能输出的数值指标（奖励或成本）。
             for k, v in log_src.items():
                 k_clean = sanitize_term_key(k)
@@ -252,6 +304,11 @@ class CPO:
                 "cpo/lam": 0.0,
                 "cpo/step_frac": 0.0,
                 "cpo/recovery": 0.0,
+                "policy_surr_reward": 0.0,
+                "policy_surr_cost": 0.0,
+                "policy_entropy": 0.0,
+                "policy_std_min": 0.0,
+                "policy_std_max": 0.0,
                 "Meta/update_skipped_no_complete_ep": 1.0,
             }
         else:
@@ -269,6 +326,21 @@ class CPO:
             "Meta/fps": fps,
             "Policy/mean_action_std": self.storage.sigma.mean().item(),
         }
+
+        if debug_metric_count > 0:
+            results["Debug/cmd_lin_xy"] = debug_cmd_lin_xy_sum / debug_metric_count
+            results["Debug/cmd_ang_vel_z"] = debug_cmd_ang_z_sum / debug_metric_count
+            results["Debug/act_lin_xy"] = debug_act_lin_xy_sum / debug_metric_count
+            results["Debug/act_ang_vel_z"] = debug_act_ang_z_sum / debug_metric_count
+            results["Debug/lin_xy_err"] = debug_lin_xy_err_sum / debug_metric_count
+            results["Debug/ang_vel_z_err"] = debug_ang_z_err_sum / debug_metric_count
+        else:
+            results["Debug/cmd_lin_xy"] = 0.0
+            results["Debug/cmd_ang_vel_z"] = 0.0
+            results["Debug/act_lin_xy"] = 0.0
+            results["Debug/act_ang_vel_z"] = 0.0
+            results["Debug/lin_xy_err"] = 0.0
+            results["Debug/ang_vel_z_err"] = 0.0
         results.update(update_res)
 
         for k, tot in log_sums.items():
@@ -337,6 +409,11 @@ class CPO:
                 "cpo/lam": 0.0,
                 "cpo/step_frac": 0.0,
                 "cpo/recovery": 0.0,
+                "policy_surr_reward": 0.0,
+                "policy_surr_cost": 0.0,
+                "policy_entropy": 0.0,
+                "policy_std_min": 0.0,
+                "policy_std_max": 0.0,
             }
 
         obs, acts = obs.to(self.device), acts.to(self.device)
@@ -416,8 +493,14 @@ class CPO:
         cur_log_p = self.actor_critic._squashed_log_prob(cur_dist, acts)
         ratio = torch.exp(cur_log_p - log_p)
         entropy = cur_dist.entropy().sum(-1)
-        loss_pi = (ratio * advs).mean() + self.entropy_coef * entropy.mean()
-        loss_cost = (ratio * c_advs).mean()
+        surr_reward = (ratio * advs).mean()
+        surr_cost = (ratio * c_advs).mean()
+        entropy_mean = entropy.mean()
+        loss_pi = surr_reward + self.entropy_coef * entropy_mean
+        loss_cost = surr_cost
+
+        std_min = cur_std.min()
+        std_max = cur_std.max()
 
         params = list(self.actor_critic.actor_mean.parameters()) + [self.actor_critic.std]
         grads_g = torch.autograd.grad(loss_pi, params, retain_graph=True)
@@ -449,26 +532,49 @@ class CPO:
 
         # 计算估计回合成本与目标上限之间的差距。
         c_val = est_ep_cost - self.cost_limit
-        if c_val < 0:
-            c_val = max(c_val, -0.5)
 
-        # 二次约束求解的分母项，保持数值稳定。
-        safe_denom = torch.clamp(gHg - (bHq * bHq) / (bHr + 1e-8), min=1e-8)
+        # Solve CPO/TRPO quadratic subproblem (Achiam et al., 2017) using natural gradients.
+        # Notation:
+        #   B = g^T H^{-1} g = gHg
+        #   A = b^T H^{-1} b = bHr
+        #   C = b^T H^{-1} g = bHq
+        #   c = J_c - d      = c_val
+        # Trust-region: 0.5 * x^T H x <= target_kl  =>  2*target_kl is used in closed-form scaling.
+        eps = 1e-8
+        A = bHr
+        B = gHg
+        C = bHq
+        E = 2.0 * self.target_kl
         is_recovery = False
 
-        # 若约束被违背且成本方向没有下降，则退回到恢复模式。
-        if c_val > 0 and bHq <= 0:
-            lam_tensor = torch.tensor(0.0, device=self.device)
-            nu = torch.tensor(1.0, device=self.device)
-            step_dir = -(1.0 / (bHr + 1e-8)) * r
-            is_recovery = True
+        # If the cost direction is degenerate, fall back to unconstrained TRPO step.
+        if torch.abs(A) < eps:
+            nu = torch.tensor(0.0, device=self.device)
+            lam_tensor = torch.sqrt(torch.clamp(B, min=eps) / max(E, eps))
+            step_dir = (1.0 / (lam_tensor + eps)) * q
         else:
-            lam_tensor = torch.sqrt(2 * self.target_kl / safe_denom)
-            nu = max(0.0, (lam_tensor * bHq + c_val) / (bHr + 1e-8))
+            # Case 1: constraint is satisfied and reward step also reduces cost -> TRPO step.
+            if c_val <= 0.0 and C <= 0.0:
+                nu = torch.tensor(0.0, device=self.device)
+                lam_tensor = torch.sqrt(torch.clamp(B, min=eps) / max(E, eps))
+                step_dir = (1.0 / (lam_tensor + eps)) * q
+            else:
+                # Case 2: use constrained solution.
+                safe_denom = B - (C * C) / (A + eps)
+                safe_denom = torch.clamp(safe_denom, min=eps)
+                lam_tensor = torch.sqrt(safe_denom / max(E, eps))
+                nu = torch.clamp((C + lam_tensor * c_val) / (A + eps), min=0.0)
+                step_dir = (1.0 / (lam_tensor + eps)) * (q - nu * r)
+
+                # If we're already violating the constraint and the constrained step is ill-conditioned,
+                # fall back to a recovery step that reduces cost subject to the trust region.
+                if c_val > 0.0 and not torch.isfinite(step_dir).all():
+                    is_recovery = True
+                    nu = torch.tensor(1.0, device=self.device)
+                    lam_tensor = torch.sqrt(torch.clamp(A, min=eps) / max(E, eps))
+                    step_dir = -(1.0 / (lam_tensor + eps)) * r
 
         lam = float(lam_tensor.item())
-        if not is_recovery:
-            step_dir = (1.0 / max(1e-6, lam)) * (q - nu * r)
 
         if torch.isnan(step_dir).any() or torch.isinf(step_dir).any():
             print("[CPO] Update skipped due to NaN gradients")
@@ -480,6 +586,11 @@ class CPO:
                 "cpo/lam": lam,
                 "cpo/step_frac": 0.0,
                 "cpo/recovery": 1.0 if is_recovery else 0.0,
+                "policy_surr_reward": float(surr_reward.item()),
+                "policy_surr_cost": float(surr_cost.item()),
+                "policy_entropy": float(entropy_mean.item()),
+                "policy_std_min": float(std_min.item()),
+                "policy_std_max": float(std_max.item()),
             }
 
         # 回退线搜索，确保在接受更新前满足 KL 与成本约束。
@@ -493,6 +604,11 @@ class CPO:
             "cpo/lam": lam,
             "cpo/step_frac": search_res.get("step_frac", 0.0),
             "cpo/recovery": 1.0 if is_recovery else 0.0,
+            "policy_surr_reward": float(surr_reward.item()),
+            "policy_surr_cost": float(surr_cost.item()),
+            "policy_entropy": float(entropy_mean.item()),
+            "policy_std_min": float(std_min.item()),
+            "policy_std_max": float(std_max.item()),
         }
 
     def conjugate_gradient(self, fvp, b, nsteps: int = 10, tol: float = 1e-10):

@@ -26,7 +26,7 @@ ALGO_CFG = {
     "damping_coeff": 0.1,
     "backtrack_coeff": 0.8,
     "max_backtracks": 15,
-    "entropy_coef": 0.005,
+    "entropy_coef": 0.0,
     "fvp_sample_size": 4096,
     "critic_lr": 1e-3,
     "cost_critic_lr": 1e-3,

@@ -348,12 +348,17 @@ class GalileoCPOEnv(ManagerBasedRLEnv):
             scene = getattr(self, "scene", None)
             robot = None
             if scene is not None:
-                if hasattr(scene, "__getitem__") and "robot" in scene:
+                # Prefer indexed access (same as reward/cost terms) to avoid ambiguity between cfg and runtime assets.
+                try:
                     robot = scene["robot"]
-                elif hasattr(scene, "robot"):
+                except Exception:
+                    robot = None
+                if robot is None and hasattr(scene, "robot"):
                     robot = scene.robot
-                elif hasattr(scene, "articulations") and len(getattr(scene, "articulations")) > 0:
-                    robot = scene.articulations[0]
+                if robot is None:
+                    articulations = getattr(scene, "articulations", None)
+                    if articulations and len(articulations) > 0:
+                        robot = articulations[0]
 
             data = getattr(robot, "data", None) if robot is not None else None
             if data is not None:
@@ -403,7 +408,20 @@ class GalileoCPOEnv(ManagerBasedRLEnv):
         if cmds is None: return
 
         lin_norm = torch.norm(cmds[:, :2], dim=1)
-        # 与命令采样逻辑保持一致，小于 0.2 m/s 的平移指令置零
-        deadband_mask = lin_norm < 0.2
+        # Deadband helps remove tiny dithering commands, but the threshold must be
+        # consistent with the command curriculum.
+        cfg_obj = getattr(self, "cfg", None)
+        override = getattr(cfg_obj, "deadband_lin_vel_threshold", None) if cfg_obj is not None else None
+
+        if override is None:
+            term_cfg = getattr(term, "cfg", None)
+            threshold = float(getattr(term_cfg, "min_command_norm", 0.0) or 0.0)
+        else:
+            threshold = float(override or 0.0)
+
+        if threshold <= 0.0:
+            return
+
+        deadband_mask = lin_norm < threshold
         cmds[deadband_mask, :2] = 0.0
         
